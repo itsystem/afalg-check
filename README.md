@@ -15,23 +15,14 @@
 ## Требования
 
 - Linux;
-- Go `1.24.2+`;
+- Go `1.24+`;
 - для полного сканирования `/proc/*/fd` лучше запускать от `root`.
 
 ## Сборка
 
-В репозитории встречаются оба варианта расположения entrypoint (`main.go` в корне и `cmd/afalg-check/main.go`), поэтому можно использовать любой из командных путей ниже.
-
-### Вариант A (из корня проекта)
+Entrypoint находится в корне проекта, сборка выполняется из корня:
 
 ```bash
-go build -o itsumma-afalg-check .
-```
-
-### Вариант B (через `cmd/afalg-check`)
-
-```bash
-cd cmd/afalg-check
 go build -o itsumma-afalg-check .
 ```
 
