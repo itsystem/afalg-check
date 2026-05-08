@@ -1079,8 +1079,9 @@ func printDirtyFragDisableGuide(distro distroInfo, proc map[string]moduleInfo, b
 		}
 	}
 	if len(loadedModules) == 0 && len(builtinModules) == 0 && len(loadable) > 0 {
-		fmt.Printf("  Модули не загружены сейчас, но доступны для загрузки: %s.\n", strings.Join(loadable, ", "))
-		fmt.Println("  Рекомендуется добавить modprobe install /bin/false заранее (до потенциальной загрузки).")
+		fmt.Println(redIfVulnerable(fmt.Sprintf("  Модули не загружены сейчас, но доступны для загрузки: %s.", strings.Join(loadable, ", ")), true))
+		fmt.Println(redIfVulnerable("  Рекомендуется добавить modprobe install /bin/false заранее (до потенциальной загрузки).", true))
+		fmt.Println("    sudo sh -c \"printf 'install esp4 /bin/false\\ninstall esp6 /bin/false\\ninstall rxrpc /bin/false\\n' > /etc/modprobe.d/dirtyfrag.conf; rmmod esp6 rxrpc 2>/dev/null; rmmod -f esp4 2>/dev/null; true\"")
 		fmt.Println("  Перед любой проверкой через modprobe сначала проверьте, что уже загружено:")
 		fmt.Println("    lsmod | egrep '^(esp4|esp6|rxrpc)\\b' || echo 'esp4/esp6/rxrpc not loaded'")
 		fmt.Println("  Если выполняете проверку загрузки через modprobe, после неё обязательно выгрузите модули:")
