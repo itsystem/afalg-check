@@ -86,6 +86,13 @@ echo 3 | sudo tee /proc/sys/vm/drop_caches
 
 Если `esp4`/`esp6`/`rxrpc` собраны как built-in (видны только в `modules.builtin`), `modprobe blacklist` и `rmmod` не отключат их: в этом случае требуется обновление/пересборка ядра.
 
+Для strongSwan после установки `libcharon-extra-plugins` включите `kernel-libipsec`:
+
+```bash
+sudo sed -i 's/^\s*load\s*=\s*no/load = yes/' /etc/strongswan.d/charon/kernel-libipsec.conf
+sudo systemctl restart strongswan || sudo systemctl restart strongswan-starter
+```
+
 ```bash
 lsmod | egrep '^(esp4|esp6|rxrpc)\b' || echo 'esp4/esp6/rxrpc not loaded'
 sudo modprobe esp4 esp6 rxrpc || true

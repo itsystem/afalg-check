@@ -1203,6 +1203,9 @@ func printDirtyFragDisableGuide(distro distroInfo, proc map[string]moduleInfo, b
 			fmt.Println(redIfVulnerable("    Для strongSwan может потребоваться пакет libcharon-extra-plugins (plugin kernel-libipsec).", true))
 			fmt.Println("    Установка (Debian/Ubuntu):")
 			fmt.Println("      sudo apt-get update && sudo apt-get install -y libcharon-extra-plugins")
+			fmt.Println("    После установки включите plugin kernel-libipsec:")
+			fmt.Println("      sudo sed -i 's/^\\s*load\\s*=\\s*no/load = yes/' /etc/strongswan.d/charon/kernel-libipsec.conf")
+			fmt.Println("      sudo systemctl restart strongswan || sudo systemctl restart strongswan-starter")
 		}
 	}
 
