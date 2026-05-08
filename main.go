@@ -76,6 +76,8 @@ type cveAssessment struct {
 	Reason  string
 }
 
+var dirtyFragModules = []string{"esp4", "esp6", "rxrpc"}
+
 func normalizeModuleName(name string) string {
 	return strings.ReplaceAll(name, "-", "_")
 }
@@ -715,7 +717,7 @@ func rpmChangelogShowsFix(release string) (bool, string) {
 	return false, ""
 }
 
-func changelogMentionsCVE(path string, gz bool) bool {
+func changelogMentionsAny(path string, gz bool, needles []string) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return false
@@ -737,7 +739,22 @@ func changelogMentionsCVE(path string, gz bool) bool {
 		return false
 	}
 	text := strings.ToLower(string(data))
-	return strings.Contains(text, "cve-2026-31431") || strings.Contains(text, "algif_aead - revert to operating out-of-place")
+	for _, n := range needles {
+		if n == "" {
+			continue
+		}
+		if strings.Contains(text, strings.ToLower(n)) {
+			return true
+		}
+	}
+	return false
+}
+
+func changelogMentionsCVE(path string, gz bool) bool {
+	return changelogMentionsAny(path, gz, []string{
+		"cve-2026-31431",
+		"algif_aead - revert to operating out-of-place",
+	})
 }
 
 func debChangelogShowsFix(release string) (bool, string) {
@@ -768,6 +785,135 @@ func debChangelogShowsFix(release string) (bool, string) {
 	return false, ""
 }
 
+func rpmChangelogShowsDirtyFragFix(release string) (bool, string) {
+	if _, err := exec.LookPath("rpm"); err != nil {
+		return false, ""
+	}
+	candidates := []string{
+		"kernel-core-" + release,
+		"kernel-" + release,
+		"kernel-core",
+		"kernel",
+	}
+	needles := []string{
+		"dirty frag",
+		"xfrm-esp page-cache write",
+		"rxrpc page-cache write",
+	}
+	for _, pkg := range candidates {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		out, err := exec.CommandContext(ctx, "rpm", "-q", "--changelog", pkg).Output()
+		cancel()
+		if err != nil {
+			continue
+		}
+		text := strings.ToLower(string(out))
+		for _, n := range needles {
+			if strings.Contains(text, n) {
+				return true, "в changelog пакета " + pkg + " найдено упоминание фикса Dirty Frag"
+			}
+		}
+	}
+	return false, ""
+}
+
+func debChangelogShowsDirtyFragFix(release string) (bool, string) {
+	needles := []string{
+		"dirty frag",
+		"xfrm-esp page-cache write",
+		"rxrpc page-cache write",
+	}
+	candidates := []string{
+		filepath.Join("/usr/share/doc", "linux-image-"+release, "changelog.Debian.gz"),
+		filepath.Join("/usr/share/doc", "linux-image-unsigned-"+release, "changelog.Debian.gz"),
+		filepath.Join("/usr/share/doc", "linux-image-"+release, "changelog.gz"),
+		filepath.Join("/usr/share/doc", "linux-image-unsigned-"+release, "changelog.gz"),
+	}
+	for _, p := range candidates {
+		if changelogMentionsAny(p, true, needles) {
+			return true, "в changelog " + p + " найдено упоминание фикса Dirty Frag"
+		}
+	}
+	plainCandidates := []string{
+		filepath.Join("/usr/share/doc", "linux-image-"+release, "changelog.Debian"),
+		filepath.Join("/usr/share/doc", "linux-image-unsigned-"+release, "changelog.Debian"),
+		filepath.Join("/usr/share/doc", "linux-image-"+release, "changelog"),
+		filepath.Join("/usr/share/doc", "linux-image-unsigned-"+release, "changelog"),
+	}
+	for _, p := range plainCandidates {
+		if changelogMentionsAny(p, false, needles) {
+			return true, "в changelog " + p + " найдено упоминание фикса Dirty Frag"
+		}
+	}
+	return false, ""
+}
+
+func assessDirtyFrag(distro distroInfo, release string, present bool) cveAssessment {
+	if !present {
+		return cveAssessment{}
+	}
+	if ok, reason := rpmChangelogShowsDirtyFragFix(release); ok {
+		return cveAssessment{Patched: true, Reason: reason}
+	}
+	if ok, reason := debChangelogShowsDirtyFragFix(release); ok {
+		return cveAssessment{Patched: true, Reason: reason}
+	}
+	_ = distro
+	return cveAssessment{}
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func dpkgInstalled(pkg string) bool {
+	if !commandExists("dpkg-query") {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${Status}", pkg).Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(out)), "install ok installed")
+}
+
+func rpmInstalled(pkg string) bool {
+	if !commandExists("rpm") {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := exec.CommandContext(ctx, "rpm", "-q", pkg).Run()
+	return err == nil
+}
+
+func detectStrongSwan(distro distroInfo) (present bool, details []string) {
+	// Best-effort: binaries and/or package presence.
+	if commandExists("ipsec") || commandExists("swanctl") {
+		present = true
+		details = append(details, "найден бинарник ipsec/swanctl")
+	}
+
+	switch distro.Family {
+	case "debian":
+		if dpkgInstalled("strongswan") || dpkgInstalled("strongswan-starter") {
+			present = true
+			details = append(details, "пакет strongswan установлен (dpkg)")
+		}
+	case "rhel", "suse", "arch":
+		// RPM family and others: try rpm if available; arch often doesn't have rpm.
+		if rpmInstalled("strongswan") {
+			present = true
+			details = append(details, "пакет strongswan установлен (rpm)")
+		}
+	}
+
+	return present, details
+}
+
 func printVulnerabilitySummary(probeOK bool, proc map[string]moduleInfo, builtin map[string]bool, assessment cveAssessment) {
 	if !probeOK {
 		fmt.Println()
@@ -790,6 +936,98 @@ func printVulnerabilitySummary(probeOK bool, proc map[string]moduleInfo, builtin
 	}
 	fmt.Println()
 	fmt.Println("CVE-2026-31431: AF_ALG AEAD bind прошёл, но algif_aead не найден как модуль/builtin; проверьте конфигурацию ядра.")
+}
+
+func printDirtyFragSummary(release string, proc map[string]moduleInfo, builtin map[string]bool, assessment cveAssessment) {
+	presentAny := false
+	for _, m := range dirtyFragModules {
+		if componentPresent(m, proc, builtin) {
+			presentAny = true
+			break
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Dirty Frag: xfrm-ESP + RxRPC page-cache write")
+	if !presentAny {
+		fmt.Println(greenIfDisabled("  Поверхность атаки не подтверждена: esp4/esp6/rxrpc не найдены как loaded/built-in.", true))
+		fmt.Println("  Примечание: это не доказательство отсутствия уязвимости в ядре; проверка ориентируется на наличие модулей/компонентов.")
+		return
+	}
+	if assessment.Patched {
+		fmt.Println(greenIfDisabled("  Компоненты присутствуют, но ядро определяется как исправленное (vendor backport по changelog).", true))
+		fmt.Printf("  Основание: %s.\n", assessment.Reason)
+		return
+	}
+	fmt.Println(redIfVulnerable("  Компоненты esp4/esp6/rxrpc присутствуют — требуется mitigation или обновление ядра.", true))
+	fmt.Printf("  Версия ядра: %s\n", release)
+}
+
+func printDirtyFragDisableGuide(distro distroInfo, proc map[string]moduleInfo, builtin map[string]bool, assessment cveAssessment) {
+	presentAny := false
+	var loadedModules []string
+	var builtinModules []string
+	for _, m := range dirtyFragModules {
+		if componentPresent(m, proc, builtin) {
+			presentAny = true
+		}
+		if _, ok := moduleLoaded(m, proc); ok {
+			loadedModules = append(loadedModules, m)
+		}
+		if moduleBuiltin(m, builtin) {
+			builtinModules = append(builtinModules, m)
+		}
+	}
+	if !presentAny || assessment.Patched {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("Руководство по mitigation Dirty Frag:")
+
+	if ok, details := detectStrongSwan(distro); ok {
+		fmt.Println()
+		fmt.Println("  Обнаружен strongSwan / IPSec:")
+		if len(details) > 0 {
+			fmt.Printf("    Детали: %s\n", strings.Join(details, "; "))
+		}
+		fmt.Println("    Примечание: если вы отключаете kernel ESP (esp4/esp6), IPSec нужно перевести на userspace.")
+		if distro.Family == "debian" && !dpkgInstalled("libcharon-extra-plugins") {
+			fmt.Println(redIfVulnerable("    Для strongSwan может потребоваться пакет libcharon-extra-plugins (plugin kernel-libipsec).", true))
+			fmt.Println("    Установка (Debian/Ubuntu):")
+			fmt.Println("      sudo apt-get update && sudo apt-get install -y libcharon-extra-plugins")
+		}
+	}
+
+	if len(builtinModules) > 0 {
+		fmt.Println(redIfVulnerable("  Обнаружены built-in компоненты Dirty Frag (modules.builtin):", true), strings.Join(builtinModules, ", "))
+		fmt.Println("  Для built-in отключение через modprobe/rmmod неприменимо.")
+		fmt.Println("  Требуется обновление/пересборка ядра (или vendor-fixed kernel), затем повторная проверка.")
+		if len(loadedModules) == 0 {
+			fmt.Println("  Загружаемые компоненты Dirty Frag не обнаружены; emergency-команды выгрузки пропущены.")
+		}
+	}
+
+	if len(loadedModules) > 0 {
+		fmt.Println()
+		fmt.Println("  Перед выгрузкой модулей (если IPSec/xfrm используется) сделайте flush:")
+		fmt.Println("    sudo ip xfrm state flush")
+		fmt.Println("    sudo ip xfrm policy flush")
+		fmt.Println()
+
+		fmt.Println("    sudo sh -c \"printf 'install esp4 /bin/false\\ninstall esp6 /bin/false\\ninstall rxrpc /bin/false\\n' > /etc/modprobe.d/dirtyfrag.conf; rmmod esp6 rxrpc 2>/dev/null; rmmod -f esp4 2>/dev/null; true\"")
+		fmt.Println()
+	}
+
+	fmt.Println("  Проверка:")
+	fmt.Println("    modprobe -n -v esp4 esp6 rxrpc")
+	fmt.Println("    lsmod | egrep '^(esp4|esp6|rxrpc)\\b' || echo 'esp4/esp6/rxrpc not loaded'")
+	fmt.Println("    sudo reboot   # если модули не выгружаются или подхватываются ранней загрузкой")
+	if distro.Family != "" {
+		fmt.Println()
+		fmt.Println("  Если модули попадают в initramfs, пересоберите initramfs:")
+		printInitramfsCommand(distro)
+	}
 }
 
 func parseBuiltinIfAvailable(release string, relErr error) map[string]bool {
@@ -843,6 +1081,14 @@ func main() {
 	algifInfo, algifLoaded := moduleLoaded("algif_aead", proc)
 	algifBuiltin := moduleBuiltin("algif_aead", builtin)
 	assessment := assessCVE202631431(distro, release, probeOK, componentPresent("algif_aead", proc, builtin))
+	dirtyFragPresent := false
+	for _, m := range dirtyFragModules {
+		if componentPresent(m, proc, builtin) {
+			dirtyFragPresent = true
+			break
+		}
+	}
+	dirtyFragAssessment := assessDirtyFrag(distro, release, dirtyFragPresent)
 
 	fmt.Println("Itsumma Security Check — AF_ALG / CVE-2026-31431")
 	fmt.Println(strings.Repeat("-", 52))
@@ -870,4 +1116,14 @@ func main() {
 	printVulnerabilitySummary(probeOK, proc, builtin, assessment)
 	printAFALGProcesses(processScan, scanErr, algifInfo, algifLoaded)
 	printDisableGuide(distro, probeOK, assessment, algifInfo, algifLoaded, algifBuiltin, processScan)
+
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 52))
+	fmt.Println("Дополнительная проверка — Dirty Frag")
+	fmt.Println("Компоненты (esp4/esp6 — xfrm ESP; rxrpc — RxRPC):")
+	for _, m := range dirtyFragModules {
+		printModulePresence(m, m, true, proc, builtin, cveAssessment{})
+	}
+	printDirtyFragSummary(release, proc, builtin, dirtyFragAssessment)
+	printDirtyFragDisableGuide(distro, proc, builtin, dirtyFragAssessment)
 }

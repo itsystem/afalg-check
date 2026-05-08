@@ -1,6 +1,9 @@
 # Itsumma AF_ALG Check
 
-Диагностическая утилита для Linux, которая проверяет доступность `AF_ALG` / `algif_aead` и помогает оценить риск по `CVE-2026-31431` (copy-fail).
+Диагностическая утилита для Linux, которая проверяет:
+
+- доступность `AF_ALG` / `algif_aead` и помогает оценить риск по `CVE-2026-31431` (copy-fail);
+- наличие поверхности атаки для класса уязвимостей **Dirty Frag** (цепочка `xfrm-ESP Page-Cache Write` + `RxRPC Page-Cache Write`) по компонентам `esp4`, `esp6`, `rxrpc` и печатает mitigation.
 
 > Инструмент предназначен для defensive-проверки и не является эксплойтом.
 
@@ -11,6 +14,11 @@
 - пытается определить наличие vendor backport-фикса по changelog (`rpm`/Debian changelog);
 - показывает процессы, которые держат `AF_ALG`-сокеты (`/proc/*/fd`, best effort);
 - печатает рекомендации по mitigation для разных семейств дистрибутивов.
+
+Дополнительно для Dirty Frag:
+
+- проверяет наличие `esp4`, `esp6`, `rxrpc` (loaded / built-in / unknown);
+- печатает emergency mitigation (отключение загрузки модулей + попытка выгрузки), если компоненты присутствуют.
 
 ## Требования
 
@@ -60,6 +68,31 @@ lsmod | grep '^algif_aead\b' || echo 'algif_aead not loaded'
 
 ```bash
 dmesg | grep -i 'algif_aead\|initcall_blacklist'
+```
+
+## Dirty Frag: базовая mitigation-команда
+
+Команда из публичного runbook Dirty Frag (отключает загрузку `esp4`, `esp6`, `rxrpc` и пытается выгрузить уже загруженные модули).
+
+Если IPSec / XFRM используется (например, через strongSwan), перед выгрузкой модулей рекомендуется выполнить flush:
+
+```bash
+sudo ip xfrm state flush
+sudo ip xfrm policy flush
+```
+
+Если `esp4`/`esp6`/`rxrpc` собраны как built-in (видны только в `modules.builtin`), `modprobe blacklist` и `rmmod` не отключат их: в этом случае требуется обновление/пересборка ядра.
+
+```bash
+sudo sh -c "printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' > /etc/modprobe.d/dirtyfrag.conf; rmmod esp6 rxrpc 2>/dev/null; rmmod -f esp4 2>/dev/null; true"
+```
+
+Пост-проверка:
+
+```bash
+modprobe -n -v esp4 esp6 rxrpc
+lsmod | egrep '^(esp4|esp6|rxrpc)\b' || echo 'esp4/esp6/rxrpc not loaded'
+./itsumma-afalg-check
 ```
 
 ## Важно
