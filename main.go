@@ -21,11 +21,17 @@ import (
 
 // Linux uapi: AF_ALG is 38 on all supported arches.
 const afALG = 38
+const afRXRPC = 33
 
 const (
 	colorRed   = "\033[31m"
 	colorGreen = "\033[32m"
 	colorReset = "\033[0m"
+)
+
+const (
+	afNetlink   = 16
+	netlinkXFRM = 6
 )
 
 // sockaddrALG mirrors struct sockaddr_alg from <linux/if_alg.h>.
@@ -242,6 +248,24 @@ func tryAFALGAEADBind() error {
 	if errno != 0 {
 		return fmt.Errorf("bind(AF_ALG aead): %w", errno)
 	}
+	return nil
+}
+
+func tryXFRMNetlinkProbe() error {
+	fd, err := syscall.Socket(afNetlink, syscall.SOCK_RAW, netlinkXFRM)
+	if err != nil {
+		return fmt.Errorf("socket(AF_NETLINK, NETLINK_XFRM): %w", err)
+	}
+	defer syscall.Close(fd)
+	return nil
+}
+
+func tryRXRPCProbe() error {
+	fd, err := syscall.Socket(afRXRPC, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		return fmt.Errorf("socket(AF_RXRPC, SOCK_DGRAM): %w", err)
+	}
+	defer syscall.Close(fd)
 	return nil
 }
 
@@ -848,9 +872,12 @@ func debChangelogShowsDirtyFragFix(release string) (bool, string) {
 	return false, ""
 }
 
-func assessDirtyFrag(distro distroInfo, release string, present bool) cveAssessment {
-	if !present {
-		return cveAssessment{}
+func assessDirtyFrag(distro distroInfo, release string, xfrmProbeOK bool, rxrpcProbeOK bool) cveAssessment {
+	if !xfrmProbeOK && !rxrpcProbeOK {
+		return cveAssessment{
+			Patched: true,
+			Reason:  "xfrm/rxrpc runtime-пробы недоступны (socket(AF_NETLINK, NETLINK_XFRM) и socket(AF_RXRPC))",
+		}
 	}
 	if ok, reason := rpmChangelogShowsDirtyFragFix(release); ok {
 		return cveAssessment{Patched: true, Reason: reason}
@@ -938,7 +965,7 @@ func printVulnerabilitySummary(probeOK bool, proc map[string]moduleInfo, builtin
 	fmt.Println("CVE-2026-31431: AF_ALG AEAD bind прошёл, но algif_aead не найден как модуль/builtin; проверьте конфигурацию ядра.")
 }
 
-func printDirtyFragSummary(release string, proc map[string]moduleInfo, builtin map[string]bool, assessment cveAssessment) {
+func printDirtyFragSummary(release string, proc map[string]moduleInfo, builtin map[string]bool, xfrmProbeOK bool, rxrpcProbeOK bool, assessment cveAssessment) {
 	presentAny := false
 	for _, m := range dirtyFragModules {
 		if componentPresent(m, proc, builtin) {
@@ -959,7 +986,11 @@ func printDirtyFragSummary(release string, proc map[string]moduleInfo, builtin m
 		fmt.Printf("  Основание: %s.\n", assessment.Reason)
 		return
 	}
-	fmt.Println(redIfVulnerable("  Компоненты esp4/esp6/rxrpc присутствуют — требуется mitigation или обновление ядра.", true))
+	if !presentAny && !xfrmProbeOK && !rxrpcProbeOK {
+		fmt.Println(greenIfDisabled("  Dirty Frag probe не прошёл: XFRM и RXRPC недоступны в рантайме.", true))
+		return
+	}
+	fmt.Println(redIfVulnerable("  Обнаружен доступный runtime surface (xfrm/rxrpc) или компоненты esp4/esp6/rxrpc — требуется mitigation или обновление ядра.", true))
 	fmt.Printf("  Версия ядра: %s\n", release)
 }
 
@@ -1072,6 +1103,8 @@ func main() {
 
 	procBefore, errProcBefore := parseProcModules()
 	probeErr := tryAFALGAEADBind()
+	xfrmProbeErr := tryXFRMNetlinkProbe()
+	rxrpcProbeErr := tryRXRPCProbe()
 	procAfter, errProcAfter := parseProcModules()
 
 	// Prefer post-probe view for autoloaded algif_*.
@@ -1081,14 +1114,9 @@ func main() {
 	algifInfo, algifLoaded := moduleLoaded("algif_aead", proc)
 	algifBuiltin := moduleBuiltin("algif_aead", builtin)
 	assessment := assessCVE202631431(distro, release, probeOK, componentPresent("algif_aead", proc, builtin))
-	dirtyFragPresent := false
-	for _, m := range dirtyFragModules {
-		if componentPresent(m, proc, builtin) {
-			dirtyFragPresent = true
-			break
-		}
-	}
-	dirtyFragAssessment := assessDirtyFrag(distro, release, dirtyFragPresent)
+	xfrmProbeOK := xfrmProbeErr == nil
+	rxrpcProbeOK := rxrpcProbeErr == nil
+	dirtyFragAssessment := assessDirtyFrag(distro, release, xfrmProbeOK, rxrpcProbeOK)
 
 	fmt.Println("Itsumma Security Check — AF_ALG / CVE-2026-31431")
 	fmt.Println(strings.Repeat("-", 52))
@@ -1124,6 +1152,17 @@ func main() {
 	for _, m := range dirtyFragModules {
 		printModulePresence(m, m, true, proc, builtin, cveAssessment{})
 	}
-	printDirtyFragSummary(release, proc, builtin, dirtyFragAssessment)
+	fmt.Println("Dirty Frag runtime probes:")
+	if xfrmProbeOK {
+		fmt.Println("  XFRM probe (socket AF_NETLINK/NETLINK_XFRM): да")
+	} else {
+		fmt.Printf("  XFRM probe (socket AF_NETLINK/NETLINK_XFRM): нет (%v)\n", xfrmProbeErr)
+	}
+	if rxrpcProbeOK {
+		fmt.Println("  RXRPC probe (socket AF_RXRPC): да")
+	} else {
+		fmt.Printf("  RXRPC probe (socket AF_RXRPC): нет (%v)\n", rxrpcProbeErr)
+	}
+	printDirtyFragSummary(release, proc, builtin, xfrmProbeOK, rxrpcProbeOK, dirtyFragAssessment)
 	printDirtyFragDisableGuide(distro, proc, builtin, dirtyFragAssessment)
 }

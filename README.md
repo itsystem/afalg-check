@@ -18,6 +18,7 @@
 Дополнительно для Dirty Frag:
 
 - проверяет наличие `esp4`, `esp6`, `rxrpc` (loaded / built-in / unknown);
+- выполняет runtime-пробы `socket(AF_NETLINK, NETLINK_XFRM)` и `socket(AF_RXRPC)` без изменения конфигурации системы;
 - печатает emergency mitigation (отключение загрузки модулей + попытка выгрузки), если компоненты присутствуют.
 
 ## Требования
