@@ -518,6 +518,7 @@ func printModuleDisableGuide(distro distroInfo, algif moduleInfo, scan processSc
 	fmt.Println("    blacklist algif_aead")
 	fmt.Println("    install algif_aead /bin/false")
 	fmt.Println("    EOF'")
+	fmt.Println("    echo 3 | sudo tee /proc/sys/vm/drop_caches")
 	fmt.Println("    sudo modprobe -r algif_aead 2>/dev/null || sudo rmmod algif_aead 2>/dev/null || true")
 	fmt.Println()
 
@@ -872,11 +873,37 @@ func debChangelogShowsDirtyFragFix(release string) (bool, string) {
 	return false, ""
 }
 
-func assessDirtyFrag(distro distroInfo, release string, xfrmProbeOK bool, rxrpcProbeOK bool) cveAssessment {
+func dirtyFragLoadableModules(release string) []string {
+	if release == "" || !commandExists("modinfo") {
+		return nil
+	}
+	var loadable []string
+	for _, m := range dirtyFragModules {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		out, err := exec.CommandContext(ctx, "modinfo", "-k", release, "-F", "filename", m).Output()
+		cancel()
+		if err != nil {
+			continue
+		}
+		path := strings.TrimSpace(string(out))
+		if path != "" {
+			loadable = append(loadable, m)
+		}
+	}
+	return loadable
+}
+
+func assessDirtyFrag(distro distroInfo, release string, xfrmProbeOK bool, rxrpcProbeOK bool, present bool, loadable []string) cveAssessment {
 	if !xfrmProbeOK && !rxrpcProbeOK {
+		if present || len(loadable) > 0 {
+			return cveAssessment{
+				Patched: false,
+				Reason:  "runtime-пробы недоступны, но компоненты Dirty Frag обнаружены или доступны для загрузки (проверьте от root)",
+			}
+		}
 		return cveAssessment{
 			Patched: true,
-			Reason:  "xfrm/rxrpc runtime-пробы недоступны (socket(AF_NETLINK, NETLINK_XFRM) и socket(AF_RXRPC))",
+			Reason:  "xfrm/rxrpc runtime-пробы недоступны и esp4/esp6/rxrpc не обнаружены как loaded/built-in/loadable",
 		}
 	}
 	if ok, reason := rpmChangelogShowsDirtyFragFix(release); ok {
@@ -965,7 +992,7 @@ func printVulnerabilitySummary(probeOK bool, proc map[string]moduleInfo, builtin
 	fmt.Println("CVE-2026-31431: AF_ALG AEAD bind прошёл, но algif_aead не найден как модуль/builtin; проверьте конфигурацию ядра.")
 }
 
-func printDirtyFragSummary(release string, proc map[string]moduleInfo, builtin map[string]bool, xfrmProbeOK bool, rxrpcProbeOK bool, assessment cveAssessment) {
+func printDirtyFragSummary(release string, proc map[string]moduleInfo, builtin map[string]bool, xfrmProbeOK bool, rxrpcProbeOK bool, loadable []string, assessment cveAssessment) {
 	presentAny := false
 	for _, m := range dirtyFragModules {
 		if componentPresent(m, proc, builtin) {
@@ -986,15 +1013,25 @@ func printDirtyFragSummary(release string, proc map[string]moduleInfo, builtin m
 		fmt.Printf("  Основание: %s.\n", assessment.Reason)
 		return
 	}
-	if !presentAny && !xfrmProbeOK && !rxrpcProbeOK {
-		fmt.Println(greenIfDisabled("  Dirty Frag probe не прошёл: XFRM и RXRPC недоступны в рантайме.", true))
+	if !xfrmProbeOK && !rxrpcProbeOK {
+		fmt.Println(redIfVulnerable("  Dirty Frag probe не прошёл в текущем контексте, но безопасный статус не подтверждён.", true))
+		if assessment.Reason != "" {
+			fmt.Printf("  Основание: %s.\n", assessment.Reason)
+		}
+		if len(loadable) > 0 {
+			fmt.Printf("  Потенциально загружаемые компоненты: %s.\n", strings.Join(loadable, ", "))
+		}
+		return
+	}
+	if !presentAny && len(loadable) == 0 {
+		fmt.Println("  Runtime-векторы доступны, но esp4/esp6/rxrpc не обнаружены как loaded/built-in/loadable; проверьте конфигурацию ядра.")
 		return
 	}
 	fmt.Println(redIfVulnerable("  Обнаружен доступный runtime surface (xfrm/rxrpc) или компоненты esp4/esp6/rxrpc — требуется mitigation или обновление ядра.", true))
 	fmt.Printf("  Версия ядра: %s\n", release)
 }
 
-func printDirtyFragDisableGuide(distro distroInfo, proc map[string]moduleInfo, builtin map[string]bool, assessment cveAssessment) {
+func printDirtyFragDisableGuide(distro distroInfo, proc map[string]moduleInfo, builtin map[string]bool, loadable []string, assessment cveAssessment) {
 	presentAny := false
 	var loadedModules []string
 	var builtinModules []string
@@ -1008,6 +1045,9 @@ func printDirtyFragDisableGuide(distro distroInfo, proc map[string]moduleInfo, b
 		if moduleBuiltin(m, builtin) {
 			builtinModules = append(builtinModules, m)
 		}
+	}
+	if len(loadable) > 0 {
+		presentAny = true
 	}
 	if !presentAny || assessment.Patched {
 		return
@@ -1038,12 +1078,17 @@ func printDirtyFragDisableGuide(distro distroInfo, proc map[string]moduleInfo, b
 			fmt.Println("  Загружаемые компоненты Dirty Frag не обнаружены; emergency-команды выгрузки пропущены.")
 		}
 	}
+	if len(loadedModules) == 0 && len(builtinModules) == 0 && len(loadable) > 0 {
+		fmt.Printf("  Модули не загружены сейчас, но доступны для загрузки: %s.\n", strings.Join(loadable, ", "))
+		fmt.Println("  Рекомендуется добавить modprobe install /bin/false заранее (до потенциальной загрузки).")
+	}
 
 	if len(loadedModules) > 0 {
 		fmt.Println()
 		fmt.Println("  Перед выгрузкой модулей (если IPSec/xfrm используется) сделайте flush:")
 		fmt.Println("    sudo ip xfrm state flush")
 		fmt.Println("    sudo ip xfrm policy flush")
+		fmt.Println("    echo 3 | sudo tee /proc/sys/vm/drop_caches")
 		fmt.Println()
 
 		fmt.Println("    sudo sh -c \"printf 'install esp4 /bin/false\\ninstall esp6 /bin/false\\ninstall rxrpc /bin/false\\n' > /etc/modprobe.d/dirtyfrag.conf; rmmod esp6 rxrpc 2>/dev/null; rmmod -f esp4 2>/dev/null; true\"")
@@ -1116,7 +1161,15 @@ func main() {
 	assessment := assessCVE202631431(distro, release, probeOK, componentPresent("algif_aead", proc, builtin))
 	xfrmProbeOK := xfrmProbeErr == nil
 	rxrpcProbeOK := rxrpcProbeErr == nil
-	dirtyFragAssessment := assessDirtyFrag(distro, release, xfrmProbeOK, rxrpcProbeOK)
+	dirtyFragPresent := false
+	for _, m := range dirtyFragModules {
+		if componentPresent(m, proc, builtin) {
+			dirtyFragPresent = true
+			break
+		}
+	}
+	dirtyFragLoadable := dirtyFragLoadableModules(release)
+	dirtyFragAssessment := assessDirtyFrag(distro, release, xfrmProbeOK, rxrpcProbeOK, dirtyFragPresent, dirtyFragLoadable)
 
 	fmt.Println("https://github.com/itsystem/afalg-check")
 	fmt.Println("Itsumma Security Check — AF_ALG / CVE-2026-31431; Dirty Frag: xfrm-ESP + RxRPC page-cache write")
@@ -1164,6 +1217,6 @@ func main() {
 	} else {
 		fmt.Printf("  RXRPC probe (socket AF_RXRPC): нет (%v)\n", rxrpcProbeErr)
 	}
-	printDirtyFragSummary(release, proc, builtin, xfrmProbeOK, rxrpcProbeOK, dirtyFragAssessment)
-	printDirtyFragDisableGuide(distro, proc, builtin, dirtyFragAssessment)
+	printDirtyFragSummary(release, proc, builtin, xfrmProbeOK, rxrpcProbeOK, dirtyFragLoadable, dirtyFragAssessment)
+	printDirtyFragDisableGuide(distro, proc, builtin, dirtyFragLoadable, dirtyFragAssessment)
 }

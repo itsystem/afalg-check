@@ -60,6 +60,7 @@ go build -o itsumma-afalg-check .
 
 ```bash
 cat /proc/cmdline
+echo 3 | sudo tee /proc/sys/vm/drop_caches
 modprobe -n -v algif_aead
 lsmod | grep '^algif_aead\b' || echo 'algif_aead not loaded'
 ./itsumma-afalg-check
@@ -80,6 +81,7 @@ dmesg | grep -i 'algif_aead\|initcall_blacklist'
 ```bash
 sudo ip xfrm state flush
 sudo ip xfrm policy flush
+echo 3 | sudo tee /proc/sys/vm/drop_caches
 ```
 
 Если `esp4`/`esp6`/`rxrpc` собраны как built-in (видны только в `modules.builtin`), `modprobe blacklist` и `rmmod` не отключат их: в этом случае требуется обновление/пересборка ядра.
