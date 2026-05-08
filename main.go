@@ -1118,7 +1118,8 @@ func main() {
 	rxrpcProbeOK := rxrpcProbeErr == nil
 	dirtyFragAssessment := assessDirtyFrag(distro, release, xfrmProbeOK, rxrpcProbeOK)
 
-	fmt.Println("Itsumma Security Check — AF_ALG / CVE-2026-31431")
+	fmt.Println("https://github.com/itsystem/afalg-check")
+	fmt.Println("Itsumma Security Check — AF_ALG / CVE-2026-31431; Dirty Frag: xfrm-ESP + RxRPC page-cache write")
 	fmt.Println(strings.Repeat("-", 52))
 	fmt.Println("AF_ALG probe (socket + bind aead authencesn(hmac(sha256),cbc(aes))):")
 	if probeOK {
