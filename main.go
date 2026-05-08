@@ -84,8 +84,105 @@ type cveAssessment struct {
 
 var dirtyFragModules = []string{"esp4", "esp6", "rxrpc"}
 
+type modprobeBlockState struct {
+	Blacklisted bool
+	InstallFalse bool
+	Sources []string
+}
+
 func normalizeModuleName(name string) string {
 	return strings.ReplaceAll(name, "-", "_")
+}
+
+func stripModprobeComment(line string) string {
+	if i := strings.Index(line, "#"); i >= 0 {
+		return strings.TrimSpace(line[:i])
+	}
+	return strings.TrimSpace(line)
+}
+
+func parseModprobeBlockStates(modules []string) map[string]modprobeBlockState {
+	states := make(map[string]modprobeBlockState, len(modules))
+	modSet := make(map[string]bool, len(modules))
+	for _, m := range modules {
+		n := normalizeModuleName(m)
+		modSet[n] = true
+		states[n] = modprobeBlockState{}
+	}
+
+	dirs := []string{
+		"/etc/modprobe.d",
+		"/run/modprobe.d",
+		"/usr/local/lib/modprobe.d",
+		"/usr/lib/modprobe.d",
+		"/lib/modprobe.d",
+	}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			f, err := os.Open(path)
+			if err != nil {
+				continue
+			}
+			s := bufio.NewScanner(f)
+			for s.Scan() {
+				line := stripModprobeComment(s.Text())
+				if line == "" {
+					continue
+				}
+				fields := strings.Fields(line)
+				if len(fields) < 2 {
+					continue
+				}
+				mod := normalizeModuleName(fields[1])
+				if !modSet[mod] {
+					continue
+				}
+				state := states[mod]
+				switch fields[0] {
+				case "blacklist":
+					state.Blacklisted = true
+					state.Sources = append(state.Sources, path)
+				case "install":
+					if len(fields) >= 3 {
+						rest := strings.ToLower(strings.Join(fields[2:], " "))
+						if strings.Contains(rest, "/bin/false") || strings.Contains(rest, "/usr/bin/false") {
+							state.InstallFalse = true
+							state.Sources = append(state.Sources, path)
+						}
+					}
+				}
+				states[mod] = state
+			}
+			f.Close()
+		}
+	}
+	return states
+}
+
+func allModulesBlocked(modules []string, states map[string]modprobeBlockState) bool {
+	if len(modules) == 0 {
+		return false
+	}
+	for _, m := range modules {
+		state := states[normalizeModuleName(m)]
+		if !state.Blacklisted && !state.InstallFalse {
+			return false
+		}
+	}
+	return true
+}
+
+func isModuleBlocked(module string, states map[string]modprobeBlockState) bool {
+	state := states[normalizeModuleName(module)]
+	return state.Blacklisted || state.InstallFalse
 }
 
 func kernelRelease() (string, error) {
@@ -580,6 +677,14 @@ func printProbeMitigatedFooter() {
 }
 
 func printDisableGuide(distro distroInfo, probeOK bool, assessment cveAssessment, algif moduleInfo, loaded bool, builtin bool, scan processScanResult) {
+	algifState := parseModprobeBlockStates([]string{"algif_aead"})
+	if isModuleBlocked("algif_aead", algifState) {
+		fmt.Println()
+		fmt.Println("Руководство по отключению algif_aead:")
+		fmt.Println(greenIfDisabled("  Действия не требуются: algif_aead уже блокируется через modprobe.d (blacklist/install false).", true))
+		return
+	}
+
 	if !probeOK {
 		printProbeMitigatedFooter()
 		return
@@ -969,6 +1074,13 @@ func detectStrongSwan(distro distroInfo) (present bool, details []string) {
 }
 
 func printVulnerabilitySummary(probeOK bool, proc map[string]moduleInfo, builtin map[string]bool, assessment cveAssessment) {
+	algifState := parseModprobeBlockStates([]string{"algif_aead"})
+	if isModuleBlocked("algif_aead", algifState) {
+		fmt.Println()
+		fmt.Println(greenIfDisabled("CVE-2026-31431: algif_aead уже блокируется через modprobe.d (blacklist/install false) — уязвимость считается mitigated.", true))
+		return
+	}
+
 	if !probeOK {
 		fmt.Println()
 		fmt.Println(greenIfDisabled("CVE-2026-31431: AF_ALG AEAD недоступен (проба socket+bind не прошла) — с точки зрения этой проверки уязвимость исправлена / недоступна для эксплуатации.", true))
@@ -993,6 +1105,14 @@ func printVulnerabilitySummary(probeOK bool, proc map[string]moduleInfo, builtin
 }
 
 func printDirtyFragSummary(release string, proc map[string]moduleInfo, builtin map[string]bool, xfrmProbeOK bool, rxrpcProbeOK bool, loadable []string, assessment cveAssessment) {
+	blockStates := parseModprobeBlockStates(dirtyFragModules)
+	if allModulesBlocked(dirtyFragModules, blockStates) {
+		fmt.Println()
+		fmt.Println("Dirty Frag: xfrm-ESP + RxRPC page-cache write")
+		fmt.Println(greenIfDisabled("  Все компоненты esp4/esp6/rxrpc уже блокируются через modprobe.d (blacklist/install false). Уязвимость считается mitigated.", true))
+		return
+	}
+
 	presentAny := false
 	for _, m := range dirtyFragModules {
 		if componentPresent(m, proc, builtin) {
@@ -1049,12 +1169,28 @@ func printDirtyFragDisableGuide(distro distroInfo, proc map[string]moduleInfo, b
 	if len(loadable) > 0 {
 		presentAny = true
 	}
+	blockStates := parseModprobeBlockStates(dirtyFragModules)
+	if allModulesBlocked(dirtyFragModules, blockStates) {
+		fmt.Println()
+		fmt.Println("Руководство по mitigation Dirty Frag:")
+		fmt.Println(greenIfDisabled("  Действия не требуются: esp4/esp6/rxrpc уже заблокированы через modprobe.d.", true))
+		return
+	}
 	if !presentAny || assessment.Patched {
 		return
 	}
 
 	fmt.Println()
 	fmt.Println("Руководство по mitigation Dirty Frag:")
+	fmt.Println("  Текущий статус blocklist в modprobe.d:")
+	for _, m := range dirtyFragModules {
+		state := blockStates[normalizeModuleName(m)]
+		if state.Blacklisted || state.InstallFalse {
+			fmt.Printf("    %s: %s\n", m, greenIfDisabled("уже блокируется (blacklist/install false)", true))
+		} else {
+			fmt.Printf("    %s: %s\n", m, redIfVulnerable("блокировка не найдена", true))
+		}
+	}
 
 	if ok, details := detectStrongSwan(distro); ok {
 		fmt.Println()
